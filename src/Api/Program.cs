@@ -3,16 +3,22 @@ using Common;
 using Common.Database;
 using Common.Observe;
 using Common.Service;
+using Common.Stateful;
 using Conversion;
 using Garmin;
-using OpenTelemetry.Resources;
-using OpenTelemetry.Trace;
 using Peloton;
 using Prometheus;
 using Serilog;
 using Serilog.Enrichers.Span;
 using Serilog.Events;
 using Sync;
+using System.Reflection;
+
+///////////////////////////////////////////////////////////
+/// STATICS
+///////////////////////////////////////////////////////////
+Statics.MetricPrefix = Constants.ApiName;
+Statics.TracingService = Constants.ApiName;
 
 ///////////////////////////////////////////////////////////
 /// HOST
@@ -22,8 +28,7 @@ var builder = WebApplication
 
 var configProvider = builder.Configuration.AddJsonFile(Path.Join(Environment.CurrentDirectory, "configuration.local.json"), optional: true, reloadOnChange: true)
 				.AddEnvironmentVariables(prefix: "P2G_")
-				.AddCommandLine(args)
-				.Build();
+				.AddCommandLine(args);
 
 var config = new AppConfiguration();
 builder.Configuration.GetSection("Api").Bind(config.Api);
@@ -51,6 +56,8 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(c =>
 {
 	c.SwaggerDoc("v1", new Microsoft.OpenApi.Models.OpenApiInfo() { Title = "P2G API", Version = "v1" });
+	var xmlFilename = $"{Assembly.GetExecutingAssembly().GetName().Name}.xml";
+	c.IncludeXmlComments(Path.Combine(AppContext.BaseDirectory, xmlFilename));
 });
 
 builder.Services.AddSingleton<ISettingsDb, SettingsDb>();
@@ -60,7 +67,7 @@ builder.Services.AddTransient<Settings>((serviceProvider) =>
 {
 	using var tracing = Tracing.Trace($"{nameof(Program)}.DI");
 	var settingsService = serviceProvider.GetService<ISettingsService>();
-	return settingsService.GetSettingsAsync().GetAwaiter().GetResult();
+	return settingsService?.GetSettingsAsync().GetAwaiter().GetResult() ?? new Settings();
 });
 
 builder.Services.AddSingleton<AppConfiguration>((serviceProvider) =>
@@ -82,16 +89,15 @@ builder.Services.AddTransient<ISyncService, SyncService>();
 
 builder.Services.AddTransient<IConverter, FitConverter>();
 builder.Services.AddTransient<IConverter, TcxConverter>();
+builder.Services.AddTransient<IConverter, JsonConverter>();
 
 FlurlConfiguration.Configure(config.Observability);
+Tracing.EnableTracing(builder.Services, config.Observability.Jaeger);
 
 Log.Logger = new LoggerConfiguration()
 				.ReadFrom.Configuration(builder.Configuration, sectionName: $"{nameof(Observability)}:Serilog")
 				.Enrich.FromLogContext()
 				.CreateLogger();
-
-if (config.Observability.Jaeger.Enabled)
-	ConfigureTracing(builder.Services, config);
 
 var runtimeVersion = Environment.Version.ToString();
 var os = Environment.OSVersion.Platform.ToString();
@@ -104,7 +110,7 @@ Prometheus.Metrics.CreateGauge("p2g_build_info", "Build info for the running ins
 }).WithLabels(version, os, osVersion, runtimeVersion)
 .Set(1);
 
-Log.Debug("P2G Version: {@Version}", version);
+Log.Debug("Api Version: {@Version}", version);
 Log.Debug("Operating System: {@Os}", osVersion);
 Log.Debug("DotNet Runtime: {@DotnetRuntime}", runtimeVersion);
 
@@ -127,72 +133,22 @@ app.UseSwaggerUI();
 if (Log.IsEnabled(LogEventLevel.Verbose))
 	app.UseSerilogRequestLogging();
 
-app.Use(async (context, next) =>
+app.Use((context, next) =>
 {
-	using var tracing = Tracing.Trace($"{nameof(Program)}.Entrypoint");
-	await next.Invoke();
+	return next.Invoke();
 });
 
 if (config.Observability.Prometheus.Enabled)
 {
 	Log.Information("Metrics Enabled");
-	Common.Observe.Metrics.EnableCollector(config.Observability.Prometheus, Constants.ApiName);
+	Common.Observe.Metrics.EnableCollector(config.Observability.Prometheus);
 
 	app.MapMetrics();
 	app.UseHttpMetrics();
 }
 
-app.UseHttpsRedirection();
+//app.UseHttpsRedirection();
 app.UseAuthorization();
 app.MapControllers();
 
 await app.RunAsync();
-
-///////////////////////////////////////////////////////////
-/// METHODS
-///////////////////////////////////////////////////////////
-void ConfigureTracing(IServiceCollection services, AppConfiguration config)
-{
-	services.AddOpenTelemetryTracing(
-		(builder) => builder
-			.SetResourceBuilder(ResourceBuilder.CreateDefault().AddService("p2g"))
-			.AddSource("P2G")
-			.SetSampler(new AlwaysOnSampler())
-			.SetErrorStatusOnException()
-			.AddAspNetCoreInstrumentation(c =>
-			{
-				c.RecordException = true;
-				c.Enrich = (activity, name, rawEventObject) =>
-				{
-					activity.SetTag(TagKey.App, TagValue.P2G);
-					activity.SetTag("SpanId", activity.SpanId);
-					activity.SetTag("TraceId", activity.TraceId);
-
-					if (name.Equals("OnStartActivity")
-						&& rawEventObject is HttpRequest httpRequest)
-					{
-						if (httpRequest.Headers.TryGetValue("TraceId", out var incomingTraceParent))
-							activity.SetParentId(incomingTraceParent);
-
-						if (httpRequest.Headers.TryGetValue("uber-trace-id", out incomingTraceParent))
-							activity.SetParentId(incomingTraceParent);
-					}
-				};
-			})
-			.AddHttpClientInstrumentation(h =>
-			{
-				h.RecordException = true;
-				h.Enrich = (activity, name, rawEventObject) =>
-				{
-					activity.SetTag(TagKey.App, TagValue.P2G);
-					activity.SetTag("SpanId", activity.SpanId);
-					activity.SetTag("TraceId", activity.TraceId);
-				};
-			})
-			.AddJaegerExporter(o =>
-			{
-				o.AgentHost = config.Observability.Jaeger.AgentHost;
-				o.AgentPort = config.Observability.Jaeger.AgentPort.GetValueOrDefault();
-			})
-		);
-}

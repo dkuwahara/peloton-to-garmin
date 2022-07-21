@@ -1,4 +1,5 @@
-﻿using Common;
+﻿using Api.Contracts;
+using Common;
 using Common.Observe;
 using Common.Service;
 using Microsoft.AspNetCore.Mvc;
@@ -6,6 +7,9 @@ using Microsoft.AspNetCore.Mvc;
 namespace Api.Controllers;
 
 [ApiController]
+[Route("api/settings")]
+[Produces("application/json")]
+[Consumes("application/json")]
 public class SettingsController : Controller
 {
 	private readonly ISettingsService _settingsService;
@@ -17,23 +21,32 @@ public class SettingsController : Controller
 		_appConfiguration = appConfiguration;
 	}
 
+	/// <summary>
+	/// Get the current settings.
+	/// </summary>
+	/// <response code="200">Returns the settings</response>
 	[HttpGet]
-	[Route("/api/settings")]
-	public async Task<Settings> Get()
+	[ProducesResponseType(StatusCodes.Status200OK)]
+	public async Task<SettingsGetResponse> Get()
 	{
 		using var tracing = Tracing.Trace($"{nameof(SettingsController)}.{nameof(Get)}");
 
 		var settings = await _settingsService.GetSettingsAsync();
 
-		settings.Peloton.Password = null;
-		settings.Garmin.Password = null;
+		var settingsResponse = new SettingsGetResponse(settings);
+		settingsResponse.Peloton.Password = null;
+		settingsResponse.Garmin.Password = null;
 
-		return settings;
+		return settingsResponse;
 	}
 
+	/// <summary>
+	/// Create or update all settings.
+	/// </summary>
+	/// <response code="200">Returns the settings</response>
 	[HttpPost]
-	[Route("/api/settings")]
-	public async Task<Settings> Post([FromBody]Settings updatedSettings)
+	[ProducesResponseType(StatusCodes.Status200OK)]
+	public async Task<SettingsGetResponse> Post([FromBody]Settings updatedSettings)
 	{
 		using var tracing = Tracing.Trace($"{nameof(SettingsController)}.{nameof(Post)}");
 
@@ -41,9 +54,19 @@ public class SettingsController : Controller
 
 		await _settingsService.UpdateSettings(updatedSettings);
 
-		return await _settingsService.GetSettingsAsync();
+		var settings = await _settingsService.GetSettingsAsync();
+
+		var settingsResponse = new SettingsGetResponse(settings);
+		settingsResponse.Peloton.Password = null;
+		settingsResponse.Garmin.Password = null;
+
+		return settingsResponse;
 	}
 
+	/// <summary>
+	/// Update App settings.
+	/// </summary>
+	/// <response code="200">Returns the app settings</response>
 	[HttpPost]
 	[Route("/api/settings/app")]
 	public async Task<App> AppPost([FromBody] App updatedAppSettings)
@@ -61,6 +84,10 @@ public class SettingsController : Controller
 		return updatedSettings.App;
 	}
 
+	/// <summary>
+	/// Update Format settings.
+	/// </summary>
+	/// <response code="200">Returns the format settings</response>
 	[HttpPost]
 	[Route("/api/settings/format")]
 	public async Task<Format> FormatPost([FromBody] Format updatedFormatSettings)
@@ -78,9 +105,13 @@ public class SettingsController : Controller
 		return updatedSettings.Format;
 	}
 
+	/// <summary>
+	/// Update Peloton settings.
+	/// </summary>
+	/// <response code="200">Returns the Peloton settings</response>
 	[HttpPost]
 	[Route("/api/settings/peloton")]
-	public async Task<Common.Peloton> PelotonPost([FromBody] Common.Peloton updatedPelotonSettings)
+	public async Task<SettingsPelotonGetResponse> PelotonPost([FromBody] Common.Peloton updatedPelotonSettings)
 	{
 		using var tracing = Tracing.Trace($"{nameof(SettingsController)}.{nameof(PelotonPost)}");
 
@@ -92,12 +123,19 @@ public class SettingsController : Controller
 		await _settingsService.UpdateSettings(settings);
 		var updatedSettings = await _settingsService.GetSettingsAsync();
 
-		return updatedSettings.Peloton;
+		var settingsResponse = new SettingsGetResponse(updatedSettings);
+		settingsResponse.Peloton.Password = null;
+
+		return settingsResponse.Peloton;
 	}
 
+	/// <summary>
+	/// Update Garmin settings.
+	/// </summary>
+	/// <response code="200">Returns the Garmin settings</response>
 	[HttpPost]
 	[Route("/api/settings/garmin")]
-	public async Task<Common.Garmin> GarminPost([FromBody] Common.Garmin updatedGarminSettings)
+	public async Task<SettingsGarminGetResponse> GarminPost([FromBody] Common.Garmin updatedGarminSettings)
 	{
 		using var tracing = Tracing.Trace($"{nameof(SettingsController)}.{nameof(GarminPost)}");
 
@@ -109,6 +147,9 @@ public class SettingsController : Controller
 		await _settingsService.UpdateSettings(settings);
 		var updatedSettings = await _settingsService.GetSettingsAsync();
 
-		return updatedSettings.Garmin;
+		var settingsResponse = new SettingsGetResponse(updatedSettings);
+		settingsResponse.Garmin.Password = null;
+
+		return settingsResponse.Garmin;
 	}
 }

@@ -1,5 +1,4 @@
 ﻿using Common;
-using Common.Database;
 using Common.Dto;
 using Common.Dto.Garmin;
 using Common.Dto.Peloton;
@@ -20,11 +19,11 @@ namespace Conversion
 		private static readonly ILogger _logger = LogContext.ForClass<FitConverter>();
 		public FitConverter(Settings settings, IFileHandling fileHandler) : base(settings, fileHandler) { }
 
-		public override void Convert()
+		public override ConvertStatus Convert(P2GWorkout workout)
 		{
-			if (!_config.Format.Fit) return;
+			if (!_config.Format.Fit) return new ConvertStatus() { Success = true, ErrorMessage = "Fit format disabled in config."};
 
-			base.Convert(FileFormat.Fit);
+			return base.Convert(FileFormat.Fit, workout);
 		}
 
 		protected override void Save(Tuple<string, ICollection<Mesg>> data, string path)
@@ -45,8 +44,19 @@ namespace Conversion
 					encoder.Close();
 				}
 
-				_logger.Information("Encoded FIT file {@Path}", fitDest.Name);
+				_logger.Information("[{@Format}] Encoded file {@Path}", FileFormat.Fit, fitDest.Name);
 			}
+		}
+
+		protected override void SaveLocalCopy(string sourcePath, string workoutTitle)
+		{
+			if (!_config.Format.Fit || !_config.Format.SaveLocalCopy) return;
+
+			_fileHandler.MkDirIfNotExists(_config.App.FitDirectory);
+
+			var backupDest = Path.Join(_config.App.FitDirectory, $"{workoutTitle}.fit");
+			_fileHandler.Copy(sourcePath, backupDest, overwrite: true);
+			_logger.Information("[{@Format}] Backed up file {@File}", FileFormat.Fit, backupDest);
 		}
 
 		protected override Tuple<string, ICollection<Mesg>> Convert(Workout workout, WorkoutSamples workoutSamples)

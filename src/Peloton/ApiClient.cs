@@ -75,7 +75,7 @@ namespace Peloton
 				SessionId = response.session_id;
 			} catch(Exception e)
 			{
-				_logger.Fatal(e, "Failed to authenticate with Peloton.");
+				_logger.Fatal(e, "Failed to authenticate with Peloton. Email: {@Email}", _userEmail);
 				throw new PelotonAuthenticationError("Failed to authenticate with Peloton", e);
 			}
 		}
@@ -89,6 +89,7 @@ namespace Peloton
 				limit = numWorkouts,
 				sort_by = "-created",
 				page = page,
+				joins= "ride"
 			})
 			.ConfigureRequest((c) => 
 			{

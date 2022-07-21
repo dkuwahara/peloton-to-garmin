@@ -1,10 +1,10 @@
 ﻿using Common;
-using Common.Database;
 using Common.Dto;
 using Common.Dto.Garmin;
 using Common.Dto.Peloton;
 using Common.Helpers;
 using Common.Observe;
+using Common.Stateful;
 using Dynastream.Fit;
 using Prometheus;
 using Serilog;
@@ -18,15 +18,17 @@ namespace Conversion
 {
 	public interface IConverter
 	{
-		public void Convert();
+		ConvertStatus Convert(P2GWorkout workoutData);
 	}
 
 	public abstract class Converter<T> : IConverter
 	{
-		private static readonly Histogram WorkoutsConverted = Metrics.CreateHistogram("p2g_workouts_converted_duration_seconds", "The histogram of workouts converted.", new HistogramConfiguration()
+		private static readonly Histogram WorkoutsConverted = Metrics.CreateHistogram($"{Statics.MetricPrefix}_workouts_converted_duration_seconds", "The histogram of workouts converted.", new HistogramConfiguration()
 		{
 			LabelNames = new string[] { Common.Observe.Metrics.Label.FileType }
 		});
+
+		private static readonly ILogger _logger = LogContext.ForClass<Converter<T>>();
 
 		private static readonly GarminDeviceInfo CyclingDevice = new GarminDeviceInfo()
 		{
@@ -69,122 +71,95 @@ namespace Conversion
 			_fileHandler = fileHandler;
 		}
 
-		public abstract void Convert();
+		public abstract ConvertStatus Convert(P2GWorkout workoutData);
 
 		protected abstract T Convert(Workout workout, WorkoutSamples workoutSamples);
 
 		protected abstract void Save(T data, string path);
 
-		protected void Convert(FileFormat format)
+		protected abstract void SaveLocalCopy(string sourcePath, string workoutTitle);
+
+		protected ConvertStatus Convert(FileFormat format, P2GWorkout workoutData)
 		{
-			using var tracingConvert = Tracing.Trace($"{nameof(IConverter)}.{nameof(Convert)}")
-										.WithTag(TagKey.Format, format.ToString());
-
-			if (!_fileHandler.DirExists(_config.App.DownloadDirectory))
-			{
-				Log.Information("No download directory found. Nothing to do. {@File}", _config.App.DownloadDirectory);
-				return;
-			}
-
-			var files = _fileHandler.GetFiles(_config.App.DownloadDirectory);
-
-			if (files.Length == 0)
-			{
-				Log.Information("No files to convert in download directory. Nothing to do. {@File}", _config.App.DownloadDirectory);
-				return;
-			}
-
-			if (_config.Garmin.Upload)
-				_fileHandler.MkDirIfNotExists(_config.App.UploadDirectory);
-
-			// Foreach file in directory
-			foreach (var file in files)
-			{
-				using var workoutTimer = WorkoutsConverted.WithLabels(format.ToString()).NewTimer();
-
-				// load file and deserialize
-				P2GWorkout workoutData = null;
-				try
-				{
-					workoutData = _fileHandler.DeserializeJson<P2GWorkout>(file);
-				}
-				catch (Exception e)
-				{
-					Log.Error(e, "Failed to load and parse workout data {@File}", file);
-					_fileHandler.MoveFailedFile(file, _config.App.FailedDirectory);
-					continue;
-				}
-
-				using var tracing = Tracing.Trace($"{nameof(IConverter)}.{nameof(Convert)}.Workout")
+			using var tracing = Tracing.Trace($"{nameof(IConverter)}.{nameof(Convert)}.Workout")?
 										.WithWorkoutId(workoutData.Workout.Id)
 										.WithTag(TagKey.Format, format.ToString());
 
-				// call internal convert method
-				T converted = default;
-				var workoutTitle = WorkoutHelper.GetUniqueTitle(workoutData.Workout);
+			var status = new ConvertStatus();
+
+			// call internal convert method
+			T converted = default;
+			var workoutTitle = WorkoutHelper.GetUniqueTitle(workoutData.Workout);
+			try
+			{
+				converted = Convert(workoutData.Workout, workoutData.WorkoutSamples);
+			}
+			catch (Exception e)
+			{
+				_logger.Error(e, "Failed to convert workout data to format {@Format} {@Workout}", format, workoutTitle);
+				status.Success = false;
+				status.ErrorMessage = "Failed to convert workout data.";
+				tracing?.AddTag("excetpion.message", e.Message);
+				tracing?.AddTag("exception.stacktrace", e.StackTrace);
+				tracing?.AddTag("convert.success", false);
+				tracing?.AddTag("convert.errormessage", status.ErrorMessage);
+				return status;
+			}
+
+			// write to output dir
+			var path = Path.Join(_config.App.WorkingDirectory, $"{workoutTitle}.{format}");
+			try
+			{
+				_fileHandler.MkDirIfNotExists(_config.App.WorkingDirectory);
+				Save(converted, path);
+				status.Success = true;
+			}
+			catch (Exception e)
+			{
+				status.Success = false;
+				status.ErrorMessage = "Failed to save converted workout for upload.";
+				_logger.Error(e, "Failed to write {@Format} file for {@Workout}", format, workoutTitle);
+				tracing?.AddTag("excetpion.message", e.Message);
+				tracing?.AddTag("exception.stacktrace", e.StackTrace);
+				tracing?.AddTag("convert.success", false);
+				tracing?.AddTag("convert.errormessage", status.ErrorMessage);
+				return status;
+			}
+
+			// copy to local save
+			try
+			{
+				SaveLocalCopy(path, workoutTitle);
+			}
+			catch (Exception e)
+			{
+				_logger.Error(e, "Failed to backup {@Format} file for {@Workout}", format, workoutTitle);
+			}
+
+			// copy to upload dir
+			if (_config.Garmin.Upload && _config.Garmin.FormatToUpload == format)
+			{
 				try
 				{
-					converted = Convert(workoutData.Workout, workoutData.WorkoutSamples);
-					
-				} catch (Exception e)
-				{
-					Log.Error(e, "Failed to convert workout data to format {@Format} {@Workout} {@File}", format, workoutTitle, file);
-				}				
-
-				if (converted is null)
-				{
-					_fileHandler.MoveFailedFile(file, _config.App.FailedDirectory);
-					continue;
-				}
-
-				// write to output dir
-				var path = Path.Join(_config.App.WorkingDirectory, $"{workoutTitle}.{format}");
-				try
-				{
-					Save(converted, path);
+					var uploadDest = Path.Join(_config.App.UploadDirectory, $"{workoutTitle}.{format}");
+					_fileHandler.MkDirIfNotExists(_config.App.UploadDirectory);
+					_fileHandler.Copy(path, uploadDest, overwrite: true);
+					_logger.Debug("Prepped {@Format} for upload: {@Path}", format, uploadDest);
 				}
 				catch (Exception e)
 				{
-					Log.Error(e, "Failed to write {@Format} file for {@Workout}", format, workoutTitle);
-					continue;
-				}
-
-				// copy to local save
-				if (_config.Format.SaveLocalCopy)
-				{
-					try
-					{
-						_fileHandler.MkDirIfNotExists(_config.App.TcxDirectory);
-						_fileHandler.MkDirIfNotExists(_config.App.FitDirectory);
-						var dir = format == FileFormat.Fit ? _config.App.FitDirectory : _config.App.TcxDirectory;
-
-						var backupDest = Path.Join(dir, $"{workoutTitle}.{format}");
-						_fileHandler.Copy(path, backupDest, overwrite: true);
-						Log.Information("Backed up file {@File}", backupDest);
-					}
-					catch (Exception e)
-					{
-						Log.Error(e, "Failed to backup {@Format} file for {@Workout}", format, workoutTitle);
-						continue;
-					}
-				}
-
-				// copy to upload dir
-				if (_config.Garmin.Upload && _config.Garmin.FormatToUpload == format)
-				{
-					try
-					{
-						var uploadDest = Path.Join(_config.App.UploadDirectory, $"{workoutTitle}.{format}");
-						_fileHandler.Copy(path, uploadDest, overwrite: true);
-						Log.Debug("Prepped {@Format} for upload: {@Path}", format, uploadDest);
-					}
-					catch (Exception e)
-					{
-						Log.Error(e, "Failed to copy {@Format} file for {@Workout}", format, workoutTitle);
-						continue;
-					}
+					_logger.Error(e, "Failed to copy {@Format} file for {@Workout}", format, workoutTitle);
+					status.Success = false;
+					status.ErrorMessage = $"Failed to save file for {@format} and workout {workoutTitle} to Upload directory";
+					tracing?.AddTag("excetpion.message", e.Message);
+					tracing?.AddTag("exception.stacktrace", e.StackTrace);
+					tracing?.AddTag("convert.success", false);
+					tracing?.AddTag("convert.errormessage", status.ErrorMessage);
+					return status;
 				}
 			}
+
+			return status;
 		}
 
 		protected System.DateTime GetStartTimeUtc(Workout workout)
@@ -251,14 +226,14 @@ namespace Conversion
 		{
 			if (workoutSamples?.Summaries is null)
 			{
-				Log.Verbose("No workout Summaries found.");
+				_logger.Verbose("No workout Summaries found.");
 				return null;
 			}
 
 			var summaries = workoutSamples.Summaries;
 			var distanceSummary = summaries.FirstOrDefault(s => s.Slug == "distance");
 			if (distanceSummary is null)
-				Log.Verbose("No distance slug found.");
+				_logger.Verbose("No distance slug found.");
 
 			return distanceSummary;
 		}
@@ -267,14 +242,14 @@ namespace Conversion
 		{
 			if (workoutSamples?.Summaries is null)
 			{
-				Log.Verbose("No workout Summaries found.");
+				_logger.Verbose("No workout Summaries found.");
 				return null;
 			}
 
 			var summaries = workoutSamples.Summaries;
 			var caloriesSummary = summaries.FirstOrDefault(s => s.Slug == "calories");
 			if (caloriesSummary is null)
-				Log.Verbose("No calories slug found.");
+				_logger.Verbose("No calories slug found.");
 
 			return caloriesSummary;
 		}
@@ -480,7 +455,7 @@ namespace Conversion
 		{
 			if (workoutSamples?.Metrics is null)
 			{
-				Log.Verbose("No workout Metrics found.");
+				_logger.Verbose("No workout Metrics found.");
 				return null;
 			}
 
@@ -494,7 +469,7 @@ namespace Conversion
 			}
 
 			if (metric is null)
-				Log.Verbose($"No {slug} found.");
+				_logger.Verbose($"No {slug} found.");
 
 			return metric;
 		}

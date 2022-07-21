@@ -9,6 +9,9 @@ using ILogger = Serilog.ILogger;
 namespace Api.Controllers;
 
 [ApiController]
+[Route("api/sync")]
+[Produces("application/json")]
+[Consumes("application/json")]
 public class SyncController : Controller
 {
 	private static readonly ILogger _logger = LogContext.ForClass<SyncController>();
@@ -24,17 +27,26 @@ public class SyncController : Controller
 		_db = db;
 	}
 
+	/// <summary>
+	/// Syncs a given set of workouts from Peloton to Garmin.
+	/// </summary>
+	/// <response code="204">Returns the sync status information.</response>
+	/// <response code="422">If the request fields are invalid.</response>
 	[HttpPost]
-	[Route("/api/sync")]
 	[ProducesResponseType(typeof(SyncPostResponse), 204)]
 	public async Task<SyncPostResponse> SyncAsync([FromBody] SyncPostRequest request)
 	{
 		using var tracing = Tracing.Trace($"{nameof(SyncController)}.{nameof(SyncAsync)}");
 
-		if (request.NumWorkouts <= 0)
-			throw new Exception(); // TODO: throw correct http error
+		if (request is null ||
+			(request.NumWorkouts <= 0 && (!request.WorkoutIds?.Any() ?? true)))
+			throw new HttpRequestException("Either NumWorkouts or WorkoutIds must be set", null, System.Net.HttpStatusCode.UnprocessableEntity);
 
-		var syncResult = await _syncService.SyncAsync(request.NumWorkouts);
+		SyncResult syncResult = new();
+		if (request.NumWorkouts > 0)
+			syncResult = await _syncService.SyncAsync(request.NumWorkouts);
+		else
+			syncResult = await _syncService.SyncAsync(request.WorkoutIds, exclude: null);
 
 		return new SyncPostResponse()
 		{
@@ -46,8 +58,11 @@ public class SyncController : Controller
 		};
 	}
 
+	/// <summary>
+	/// Fetches the current Sync status.
+	/// </summary>
+	/// <response code="200">Returns the sync status information.</response>
 	[HttpGet]
-	[Route("/api/sync")]
 	[ProducesResponseType(typeof(SyncGetResponse), 200)]
 	public async Task<SyncGetResponse> GetAsync()
 	{

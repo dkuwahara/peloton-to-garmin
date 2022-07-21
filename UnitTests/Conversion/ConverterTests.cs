@@ -1,11 +1,10 @@
 ﻿using Common;
-using Common.Database;
+using Common.Dto;
 using Common.Dto.Garmin;
 using Common.Dto.Peloton;
 using Conversion;
 using Dynastream.Fit;
 using FluentAssertions;
-using Moq;
 using Moq.AutoMock;
 using NUnit.Framework;
 using System;
@@ -572,11 +571,6 @@ namespace UnitTests.Conversion
 		{
 			public ConverterInstance(Settings settings, IFileHandling fileHandling) : base(settings, fileHandling) { }
 
-			public override void Convert()
-			{
-				throw new NotImplementedException();
-			}
-
 			protected override string Convert(Workout workout, WorkoutSamples workoutSamples)
 			{
 				throw new NotImplementedException();
@@ -655,6 +649,16 @@ namespace UnitTests.Conversion
 			public GarminDeviceInfo GetDeviceInfo1(FitnessDiscipline sport)
 			{
 				return base.GetDeviceInfo(sport);
+			}
+
+			public override ConvertStatus Convert(P2GWorkout workoutData)
+			{
+				return base.Convert(FileFormat.Fit, workoutData);
+			}
+
+			protected override void SaveLocalCopy(string sourcePath, string workoutTitle)
+			{
+				return;
 			}
 		}
 	}
